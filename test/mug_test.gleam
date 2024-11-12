@@ -10,11 +10,12 @@ import glisten
 import glisten/transport
 import mug
 
+import mug_tls_test.{port as ssl_port}
+
 pub const port = 64_793
 
 pub fn main() {
-  // Start an echo TCP server for the tests to use
-  let assert Ok(_) =
+  let builder =
     glisten.new(fn(_conn) { #(Nil, None) }, fn(state, msg, conn) {
       let assert glisten.Packet(msg) = msg
       // Close connection if we receive a null, otherwise echo back.
@@ -25,7 +26,18 @@ pub fn main() {
 
       glisten.continue(state)
     })
-    |> glisten.start(port)
+
+  // Start an echo TCP server for the tests to use
+  let assert Ok(_) = glisten.start(builder, port)
+
+  // Start an echo TLS server in parallel
+  let assert Ok(_) =
+    builder
+    |> glisten.with_tls(
+      certfile: "test/certs/server.crt",
+      keyfile: "test/certs/server.key",
+    )
+    |> glisten.start(ssl_port)
 
   gleeunit.main()
 }
@@ -39,6 +51,7 @@ fn connect() -> mug.Socket {
 }
 
 pub fn connect_invalid_host_test() {
+  process.sleep(100)
   assert mug.new("invalid.example.com", port: port)
     |> mug.timeout(milliseconds: 500)
     |> mug.connect()
@@ -46,6 +59,7 @@ pub fn connect_invalid_host_test() {
 }
 
 pub fn connect_invalid_host_only_ipv4_test() {
+  process.sleep(500)
   assert mug.new("invalid.example.com", port: port)
     |> mug.ip_version_preference(mug.Ipv4Only)
     |> mug.timeout(milliseconds: 500)
@@ -54,6 +68,7 @@ pub fn connect_invalid_host_only_ipv4_test() {
 }
 
 pub fn connect_invalid_host_only_ipv6_test() {
+  process.sleep(500)
   assert mug.new("invalid.example.com", port: port)
     |> mug.ip_version_preference(mug.Ipv6Only)
     |> mug.timeout(milliseconds: 500)
@@ -62,6 +77,7 @@ pub fn connect_invalid_host_only_ipv6_test() {
 }
 
 pub fn connect_invalid_host_prefer_ipv4_test() {
+  process.sleep(500)
   assert mug.new("invalid.example.com", port: port)
     |> mug.ip_version_preference(mug.Ipv4Preferred)
     |> mug.timeout(milliseconds: 500)
@@ -70,6 +86,7 @@ pub fn connect_invalid_host_prefer_ipv4_test() {
 }
 
 pub fn connect_invalid_host_prefer_ipv6_test() {
+  process.sleep(500)
   assert mug.new("invalid.example.com", port: port)
     |> mug.ip_version_preference(mug.Ipv6Preferred)
     |> mug.timeout(milliseconds: 500)
@@ -78,6 +95,7 @@ pub fn connect_invalid_host_prefer_ipv6_test() {
 }
 
 pub fn hello_world_test() {
+  process.sleep(100)
   let socket = connect()
 
   // Nothing has been sent by the echo server yet, so we get a timeout if we try
@@ -103,6 +121,7 @@ pub fn hello_world_test() {
 }
 
 pub fn active_mode_test() {
+  process.sleep(100)
   let socket = connect()
 
   // Ask for the next packet to be sent as a message
@@ -135,6 +154,7 @@ pub fn active_mode_test() {
 }
 
 pub fn active_mode_close_test() {
+  process.sleep(100)
   let socket = connect()
 
   // Ask for the next packet to be sent as a message
@@ -155,6 +175,7 @@ pub fn active_mode_close_test() {
 }
 
 pub fn active_mode_error_test() {
+  process.sleep(100)
   // Couldn't find a way to trigger an error with an actual TCP server,
   // so we are sending the raw message to ourself instead to mock an error.
   let socket = connect()
@@ -165,12 +186,13 @@ pub fn active_mode_error_test() {
     |> mug.select_tcp_messages(fn(msg) { msg })
 
   raw_send(process.self(), #(atom.create("tcp_error"), socket, mug.Ehostdown))
-  let assert Ok(mug.TcpError(error_socket, mug.Ehostdown)) =
+  let assert Ok(mug.SocketError(error_socket, mug.Ehostdown)) =
     process.selector_receive(selector, 100)
-  error_socket |> should.equal(socket)
+  error_socket |> get_inner(2, _) |> should.equal(socket)
 }
 
 pub fn exact_bytes_receive_test() {
+  process.sleep(100)
   let socket = connect()
 
   let assert Ok(Nil) = mug.send(socket, <<"Hello":utf8>>)
@@ -185,6 +207,7 @@ pub fn exact_bytes_receive_test() {
 }
 
 pub fn exact_bytes_receive_not_enough_test() {
+  process.sleep(100)
   let socket = connect()
 
   let assert Ok(Nil) = mug.send(socket, <<"Hello":utf8>>)
@@ -200,3 +223,8 @@ pub fn exact_bytes_receive_not_enough_test() {
 
 @external(erlang, "erlang", "send")
 fn raw_send(pid: process.Pid, msg: a) -> Nil
+
+// Dirty fix to remove extra {tcp_socket, tcp_socket, {}}
+// added when sending raw message directly to the process.
+@external(erlang, "erlang", "element")
+fn get_inner(n: Int, t: mug.Socket) -> mug.Socket

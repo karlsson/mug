@@ -18,5 +18,6 @@ jobs:
           gleam-version: "1.11.1"
           rebar3-version: "3"
       - run: gleam deps download
+      - run: ./test/certs/gencerts.sh
       - run: gleam test
       - run: gleam format --check src test

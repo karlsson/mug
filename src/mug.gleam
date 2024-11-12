@@ -3,12 +3,14 @@ import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom
 import gleam/erlang/charlist.{type Charlist}
 import gleam/erlang/process
+import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/result
-
-/// A TCP socket, used to send and receive TCP messages.
-pub type Socket
-
-type DoNotLeak
+import gleam/string
+import mug/internal/ssl_options.{
+  type SslOptionName, Cacertfile, Cacerts, CertsKeys, Verify,
+}
+import mug/internal/system_cacerts
 
 /// Errors that can occur when establishing a TCP connection.
 ///
@@ -18,6 +20,99 @@ pub type ConnectError {
   ConnectFailedBoth(ipv4: Error, ipv6: Error)
 }
 
+/// A TCP socket, used to send and receive TCP messages.
+type TcpSocket
+
+/// A TLS socket, used to send and receive TCP messages.
+type SslSocket
+
+pub opaque type Socket {
+  TcpSocket(TcpSocket)
+  SslSocket(SslSocket)
+}
+
+/// Returns True if the given socket is a TLS connection (started either
+/// with `connect` or `upgrade`). Returns False if the socket is a
+/// plain-text TCP connection.
+///
+pub fn socket_is_tls(socket: Socket) {
+  case socket {
+    SslSocket(_) -> True
+    TcpSocket(_) -> False
+  }
+}
+
+type DoNotLeak
+
+/// Error occured during a TLS operation.
+///
+/// Reference: https://www.erlang.org/doc/apps/ssl/ssl.html#t:tls_alert/0
+pub type TlsAlert {
+  CloseNotify
+  UnexpectedMessage
+  BadRecordMac
+  RecordOverflow
+  HandshakeFailure
+  BadCertificate
+  UnsupportedCertificate
+  CertificateRevoked
+  CertificateExpired
+  CertificateUnknown
+  IllegalParameter
+  UnknownCa
+  AccessDenied
+  DecodeError
+  DecryptError
+  ExportRestriction
+  ProtocolVersion
+  InsufficientSecurity
+  InternalError
+  InappropriateFallback
+  UserCanceled
+  NoRenegotiation
+  UnsupportedExtension
+  CertificateUnobtainable
+  UnrecognizedName
+  BadCertificateStatusResponse
+  BadCertificateHashValue
+  UnknownPskIdentity
+  NoApplicationProtocol
+}
+
+pub fn describe_tls_alert(ta: TlsAlert) -> String {
+  case ta {
+    CloseNotify -> "Close notification"
+    UnexpectedMessage -> "Unexpected message"
+    BadRecordMac -> "Bad MAC record"
+    RecordOverflow -> "Record overflow"
+    HandshakeFailure -> "Handshake failure"
+    BadCertificate -> "Bad certificate"
+    UnsupportedCertificate -> "Unsupported certificate"
+    CertificateRevoked -> "Revoked certificate"
+    CertificateExpired -> "Expired certificate"
+    CertificateUnknown -> "Unkown certificate"
+    IllegalParameter -> "Illegal parameter"
+    UnknownCa -> "Unknown CA"
+    AccessDenied -> "Access denied"
+    DecodeError -> "Decode error"
+    DecryptError -> "Decrypt error"
+    ExportRestriction -> "Export restriction"
+    ProtocolVersion -> "Protocol version"
+    InsufficientSecurity -> "Insufficient security"
+    InternalError -> "Internal Error"
+    InappropriateFallback -> "Inappropriate fallback"
+    UserCanceled -> "User canceled"
+    NoRenegotiation -> "No renegotiation"
+    UnsupportedExtension -> "Unsupported extension"
+    CertificateUnobtainable -> "Certificate unobtainable"
+    UnrecognizedName -> "Unrecognized name"
+    BadCertificateStatusResponse -> "Bad certificate status response"
+    BadCertificateHashValue -> "Bad certificate hash value"
+    UnknownPskIdentity -> "Unknown PSK identity"
+    NoApplicationProtocol -> "No application protocol"
+  }
+}
+
 /// Errors that can occur when working with TCP sockets.
 ///
 /// For more information on these errors see the Erlang documentation:
@@ -25,6 +120,18 @@ pub type ConnectError {
 /// - https://www.erlang.org/doc/man/inet#type-posix
 ///
 pub type Error {
+  /// Unable to get the OS supplied CA certificates. This error is only returned if the
+  /// `use_system_cacerts` option is set to `true` and the system's CA certificates
+  /// could not be retrieved.
+  SystemCacertificatesGetError(system_cacerts.SystemCacertificatesGetError)
+
+  // For connect only
+  /// An invalid option was passed
+  Options(opt: Dynamic)
+
+  /// TLS connection failed
+  TlsAlert(alert: TlsAlert, description: String)
+
   // https://www.erlang.org/doc/man/inet#type-posix
   /// Connection closed
   Closed
@@ -268,6 +375,11 @@ pub fn describe_error(error: Error) -> String {
     Estale -> "Stale file handle"
     Etxtbsy -> "Text file busy"
     Exdev -> "Cross-device link"
+    Options(opt:) -> "Invalid connection option - " <> string.inspect(opt)
+    SystemCacertificatesGetError(error) ->
+      "Error getting CA certificate - " <> system_cacerts.describe_error(error)
+    TlsAlert(alert:, description:) ->
+      "TLS Alert - " <> describe_tls_alert(alert) <> " - " <> description
   }
 }
 
@@ -295,7 +407,83 @@ pub type ConnectionOptions {
     /// The default is `Ipv6Preferred`.
     ///
     ip_version_preference: IpVersionPreference,
+    /// TLS options
+    tls_opts: TlsConnectionOptions,
   )
+}
+
+/// Use TLS over TCP
+pub type TlsConnectionOptions =
+  Option(TlsOptions)
+
+// {
+//   /// Do not use TLS, use plain TCP
+//   NoTls
+//   /// Start with a TLS connection
+//   UseTls(TlsOptions)
+// }
+
+/// Configuration for TLS connections.
+pub type TlsOptions {
+  TlsOptions(verification_method: TlsVerificationMethod)
+}
+
+/// The certificates to use
+pub type TlsVerificationMethod {
+  /// Uses these CA certificates and regular certificates to verify the server's certificate.
+  ///
+  /// The `use_system_cacerts` option makes mug use the system's CA certificates, which are
+  /// usually set to a group of competent CAs who sign most of the web's certificates.
+  /// You may specifiy your own CA certificates with the `cacerts` option, and custom
+  /// certificates and their keys with the `certificates_keys` option.
+  ///
+  /// Note that specifying a PEM encoded CA certificate file will result in the system CA
+  /// certificates not being used. This is because of how the underlying [erlang implementation](https://www.erlang.org/doc/apps/ssl/ssl.html#t:client_option/0)
+  /// works. System CA certificates are passed as DER-encoded certificates, and DER encoded
+  /// certs override PEM-encoded ones. Therefore, if you wish to use a PEM encoded CA cert along
+  /// with the system's CA, you should decode the PEM into a DER using (`public_key:pem_decode`)[https://www.erlang.org/doc/apps/public_key/public_key.html#pem-api]
+  /// and use the DerEncodedCaCertificates variant instead.
+  Certificates(
+    use_system_cacerts: Bool,
+    cacerts: Option(CaCertificates),
+    certificates_keys: List(CertificatesKeys),
+  )
+  /// Do not verify certificates. While this does allow you to use self-signed certificates.
+  /// It is highly recommended to not skip verification, add a custom CA instead.
+  DangerouslyDisableVerification
+}
+
+/// The CA certificates to use
+pub type CaCertificates {
+  /// Use these der-encoded certificates as CA certificates.
+  DerEncodedCaCertificates(ca_certificates: List(BitArray))
+  /// Path to a pem-encoded file which contains CA certificates.
+  /// If this option is specified, then the system CA will not be used.
+  PemEncodedCaCertificates(ca_certificates_file: String)
+}
+
+pub type CertificatesKeys {
+  /// A list of DER-encoded certificates and their corresponding key.
+  DerEncodedCertificatesKeys(certificate: List(BitArray), key: DerEncodedKey)
+  /// Path to a file containing PEM-encoded certificates and their key, with an optional
+  /// password associated with the file containing the key.
+  PemEncodedCertificatesKeys(
+    certificate_path: String,
+    key_path: String,
+    password: Option(BitArray),
+  )
+}
+
+pub type DerEncodedKeyAlgorithm {
+  RSAPrivateKey
+  DSAPrivateKey
+  ECPrivateKey
+  PrivateKeyInfo
+}
+
+pub type DerEncodedKey {
+  /// A der-encoded key.
+  DerEncodedKey(algorithm: DerEncodedKeyAlgorithm, key: BitArray)
 }
 
 /// Create a new set of connection options.
@@ -306,6 +494,7 @@ pub fn new(host: String, port port: Int) -> ConnectionOptions {
     port: port,
     timeout: 1000,
     ip_version_preference: Ipv6Preferred,
+    tls_opts: None,
   )
 }
 
@@ -356,51 +545,108 @@ pub type IpVersionPreference {
 
 /// Establish a TCP connection to the server specified in the connection
 /// options.
+/// Use TLS for the connection.
 ///
-/// Returns an error if the connection could not be established.
+/// This function must be called before any other functions that modify the TLS
+/// connection options.
 ///
-/// The socket is created in passive mode, meaning the the `receive` function is
-/// to be called to receive packets from the client. The
-/// `receive_next_packet_as_message` function can be used to switch the socket
-/// to active mode and receive the next packet as an Erlang message.
+/// Uses the system's CA certificates to verify the server's certificate.
 ///
-pub fn connect(options: ConnectionOptions) -> Result(Socket, ConnectError) {
-  let host = charlist.from_string(options.host)
-  let connect = fn(inet) {
-    let gen_options = [
-      inet,
-      // When data is received on the socket queue it in the TCP stack rather than
-      // sending it as an Erlang message to the socket owner's inbox.
-      Active(passive()),
-      // We want the data from the socket as bit arrays please, not lists.
-      Mode(Binary),
-    ]
-    gen_tcp_connect(host, options.port, gen_options, options.timeout)
-  }
-  case options.ip_version_preference {
-    Ipv4Only -> connect(Inet) |> result.map_error(ConnectFailedIpv4)
-    Ipv6Only -> connect(Inet6) |> result.map_error(ConnectFailedIpv6)
+pub fn with_tls(options) {
+  ConnectionOptions(
+    ..options,
+    tls_opts: Some(
+      TlsOptions(
+        verification_method: Certificates(
+          use_system_cacerts: True,
+          cacerts: None,
+          certificates_keys: [],
+        ),
+      ),
+    ),
+  )
+}
 
-    Ipv4Preferred ->
-      case connect(Inet) {
-        Ok(conn) -> Ok(conn)
-        Error(ipv4) ->
-          case connect(Inet6) {
-            Ok(conn) -> Ok(conn)
-            Error(ipv6) -> Error(ConnectFailedBoth(ipv4:, ipv6:))
-          }
-      }
+/// Do not verify the server's certificate. This is dangerous and is not
+/// recommended. Use a custom certificate instead.
+pub fn dangerously_disable_verification(options) {
+  ConnectionOptions(
+    ..options,
+    tls_opts: Some(TlsOptions(
+      verification_method: DangerouslyDisableVerification,
+    )),
+  )
+}
 
-    Ipv6Preferred ->
-      case connect(Inet6) {
-        Ok(conn) -> Ok(conn)
-        Error(ipv6) ->
-          case connect(Inet) {
-            Ok(conn) -> Ok(conn)
-            Error(ipv4) -> Error(ConnectFailedBoth(ipv4:, ipv6:))
-          }
-      }
-  }
+/// Do not use the system's CA certificates to verify the server's certificate.
+///
+/// This is useful when you want to use your own CA certificates to verify the
+/// server's certificate. If verification is disabled, this function does nothing.
+pub fn no_system_cacerts(options) {
+  ConnectionOptions(..options, tls_opts: case options.tls_opts {
+    Some(TlsOptions(verification_method)) ->
+      Some(
+        TlsOptions(verification_method: case verification_method {
+          Certificates(_, cacerts, certificates_keys) ->
+            Certificates(False, cacerts, certificates_keys)
+          _ -> verification_method
+        }),
+      )
+    None -> options.tls_opts
+  })
+}
+
+/// Set the following CA Certificates for the connection. These CA certificates will be used to check
+/// the TLS server's certificate. If a PEM-encoded CA certfile is provided, the system's CA will not
+/// be used.
+///
+/// If verification is disabled, this function does nothing.
+///
+pub fn cacerts(
+  options: ConnectionOptions,
+  cacerts: CaCertificates,
+) -> ConnectionOptions {
+  ConnectionOptions(..options, tls_opts: case options.tls_opts {
+    Some(TlsOptions(verification_method)) ->
+      Some(
+        TlsOptions(verification_method: case verification_method {
+          Certificates(system, _, certificates_keys) ->
+            Certificates(system, Some(cacerts), certificates_keys)
+          _ -> verification_method
+        }),
+      )
+    None -> options.tls_opts
+  })
+}
+
+/// Set the certs_keys TLS [common cert option](https://www.erlang.org/doc/apps/ssl/ssl.html#t:common_option_cert/0).
+///
+/// The certificates_keys can be specified in two ways, a list of der-encoded certificates with their corresponding key, or
+/// the paths to a certfile and keyfile containing one or more PEM-certificates and their corresponding key. A password
+/// may also be specified for the file containing the key. Note that the entity certificate must be the first certificate
+/// in the der-encoded list or the pem-encoded file.
+///
+/// For maximum interoperability, the certificates in the chain should be in the correct order, as the chain will be
+/// sent as-is to the peer. If chain certificates are not provided, certificates from the configured trusted CA certificates
+/// will be used to construct the chain.
+///
+/// If verification is disabled, this function does nothing.
+///
+pub fn certificates_keys(
+  options: ConnectionOptions,
+  certificates_keys certificates_keys: List(CertificatesKeys),
+) -> ConnectionOptions {
+  ConnectionOptions(..options, tls_opts: case options.tls_opts {
+    Some(TlsOptions(verification_method)) ->
+      Some(
+        TlsOptions(verification_method: case verification_method {
+          Certificates(system, cacerts, _) ->
+            Certificates(system, cacerts, certificates_keys)
+          _ -> verification_method
+        }),
+      )
+    None -> options.tls_opts
+  })
 }
 
 type ModeValue {
@@ -430,7 +676,199 @@ fn gen_tcp_connect(
   port: Int,
   options: List(GenTcpOption),
   timeout: Int,
-) -> Result(Socket, Error)
+) -> Result(TcpSocket, Error)
+
+@external(erlang, "mug_ffi", "ssl_connect")
+fn ssl_connect(
+  host: Charlist,
+  port: Int,
+  gen_options: List(GenTcpOption),
+  options: List(SslOption),
+  timeout: Int,
+) -> Result(SslSocket, Error)
+
+type VerifyValue {
+  VerifyPeer
+  VerifyNone
+}
+
+type SslOption =
+  #(SslOptionName, Dynamic)
+
+@external(erlang, "gleam@function", "identity")
+fn from(value: a) -> Dynamic
+
+fn get_tls_options(vm: TlsVerificationMethod) -> Result(List(SslOption), Error) {
+  case vm {
+    DangerouslyDisableVerification -> Ok([#(Verify, from(VerifyNone))])
+    Certificates(system, cacerts, certificates_keys) -> {
+      use cacerts <- result.try(get_cacerts_opt(system, cacerts))
+      Ok([
+        #(Verify, from(VerifyPeer)),
+        cacerts,
+        #(CertsKeys, from(get_certs_keys(certificates_keys))),
+      ])
+    }
+  }
+}
+
+fn get_cacerts_opt(
+  system: Bool,
+  cacerts: Option(CaCertificates),
+) -> Result(SslOption, Error) {
+  case system, cacerts {
+    False, Some(DerEncodedCaCertificates(cacerts)) ->
+      Ok(#(Cacerts, from(cacerts)))
+    True, Some(DerEncodedCaCertificates(cacerts)) -> {
+      let certs =
+        system_cacerts.get() |> result.map_error(SystemCacertificatesGetError)
+      use certs <- result.try(certs)
+      Ok(#(Cacerts, from(list.flatten([certs.0, cacerts]))))
+    }
+    _, Some(PemEncodedCaCertificates(cacerts)) ->
+      Ok(#(Cacertfile, from(string.to_utf_codepoints(cacerts))))
+    True, None -> {
+      let certs =
+        system_cacerts.get() |> result.map_error(SystemCacertificatesGetError)
+      use certs <- result.try(certs)
+      Ok(#(Cacerts, from(certs)))
+    }
+    False, None -> Ok(#(Cacerts, from([])))
+  }
+}
+
+@external(erlang, "mug_ffi", "get_certs_keys")
+fn get_certs_keys(certs_keys: List(CertificatesKeys)) -> certs_keys
+
+/// Establish a TCP/TLS connection to the server specified in the connection
+/// options.
+///
+/// Returns an error if the connection could not be established.
+///
+/// The socket is created in passive mode, meaning the the `receive` function is
+/// to be called to receive packets from the client. The
+/// `receive_next_packet_as_message` function can be used to switch the socket
+/// to active mode and receive the next packet as an Erlang message.
+///
+pub fn connect(options: ConnectionOptions) -> Result(Socket, ConnectError) {
+  let host = charlist.from_string(options.host)
+  let connect_internal = fn(inet) {
+    let gen_options = [
+      inet,
+      // When data is received on the socket queue it in the TCP stack rather than
+      // sending it as an Erlang message to the socket owner's inbox.
+      Active(passive()),
+      // We want the data from the socket as bit arrays please, not lists.
+      Mode(Binary),
+    ]
+    case options.tls_opts {
+      Some(TlsOptions(vm)) -> {
+        use opts <- result.try(get_tls_options(vm))
+        ssl_connect(host, options.port, gen_options, opts, options.timeout)
+        |> result.map(SslSocket)
+      }
+      _ -> {
+        gen_tcp_connect(host, options.port, gen_options, options.timeout)
+        |> result.map(TcpSocket)
+      }
+    }
+  }
+  case options.ip_version_preference {
+    Ipv4Only -> connect_internal(Inet) |> result.map_error(ConnectFailedIpv4)
+    Ipv6Only -> connect_internal(Inet6) |> result.map_error(ConnectFailedIpv6)
+
+    Ipv4Preferred ->
+      case connect_internal(Inet) {
+        Ok(conn) -> Ok(conn)
+        Error(ipv4) ->
+          case connect_internal(Inet6) {
+            Ok(conn) -> Ok(conn)
+            Error(ipv6) -> {
+              Error(ConnectFailedBoth(ipv4:, ipv6:))
+            }
+          }
+      }
+
+    Ipv6Preferred ->
+      case connect_internal(Inet6) {
+        Ok(conn) -> Ok(conn)
+        Error(ipv6) ->
+          case connect_internal(Inet) {
+            Ok(conn) -> Ok(conn)
+            Error(ipv4) -> Error(ConnectFailedBoth(ipv4:, ipv6:))
+          }
+      }
+  }
+}
+
+@external(erlang, "mug_ffi", "ssl_upgrade")
+fn ssl_upgrade(
+  socket: TcpSocket,
+  options: List(SslOption),
+  timeout: Int,
+) -> Result(SslSocket, Error)
+
+/// Upgrade a plain TCP connection to TLS.
+///
+/// Accepts a socket and performs the client-side TLS handshake. This
+/// may not work on all TCP servers.
+///
+/// If the socket is already a TLS socket, this function does nothing.
+///
+/// Returns an error if the connection could not be established.
+///
+/// The socket is created in passive mode, meaning the the `receive` function is
+/// to be called to receive packets from the client. The
+/// `receive_next_packet_as_message` function can be used to switch the socket
+/// to active mode and receive the next packet as an Erlang message.
+///
+pub fn upgrade(
+  socket: Socket,
+  verification_method vm: TlsVerificationMethod,
+  timeout timeout: Int,
+) -> Result(Socket, Error) {
+  case socket {
+    TcpSocket(socket) -> {
+      use opts <- result.try(get_tls_options(vm))
+      ssl_upgrade(socket, opts, timeout)
+      |> result.map(SslSocket)
+    }
+    socket -> Ok(socket)
+  }
+}
+
+@external(erlang, "mug_ffi", "ssl_downgrade")
+fn ssl_downgrade(
+  socket: SslSocket,
+  milliseconds timeout: Int,
+) -> Result(#(TcpSocket, Option(BitArray)), Error)
+
+/// Attempts to downgrade the connection. If downgrade is not successful, the socket is closed.
+///
+/// On successful downgrade, it returns the downgraded TCP socket, and *optionally*
+/// some binary data that must be treated as the first bytes received on the
+/// downgraded connection. If the connection gets closed instead of getting
+/// downgraded, then the `Closed` error is returned.
+///
+/// If this function is called on a TcpSocket, it will return the same socket
+/// and None for the downgraded data.
+///
+/// Internally, it uses [`ssl:close/2`](https://www.erlang.org/doc/apps/ssl/ssl.html#close/2)
+/// to perform the downgrade, which returns `ok` if the socket is closed, while
+/// this function returns an error. It is recommended against using this function
+/// to close the socket. Use `shutdown` instead.
+///
+pub fn downgrade(
+  socket: Socket,
+  milliseconds timeout: Int,
+) -> Result(#(Socket, Option(BitArray)), Error) {
+  case socket {
+    SslSocket(sock) ->
+      ssl_downgrade(sock, timeout)
+      |> result.map(fn(x) { #(TcpSocket(x.0), x.1) })
+    TcpSocket(sock) -> Ok(#(TcpSocket(sock), None))
+  }
+}
 
 /// Send a message to the client.
 ///
@@ -438,9 +876,9 @@ pub fn send(socket: Socket, message: BitArray) -> Result(Nil, Error) {
   send_builder(socket, bytes_tree.from_bit_array(message))
 }
 
-/// Send a message to the client, the data in `BytesBuilder`. Using this function
-/// is more efficient turning an `BytesBuilder` or a `StringBuilder` into a
-/// `BitArray` to use with the `send` function.
+/// Send a message to the client, the data in `BytesBuilder`. Using this
+/// function is more efficient than turning a `BytesBuilder` or a
+/// `StringBuilder` into a `BitArray` to use with the `send` function.
 ///
 @external(erlang, "mug_ffi", "send")
 pub fn send_builder(socket: Socket, packet: BytesTree) -> Result(Nil, Error)
@@ -475,7 +913,7 @@ pub fn receive_exact(
   gen_tcp_receive(socket, size, timeout_milliseconds: timeout)
 }
 
-@external(erlang, "gen_tcp", "recv")
+@external(erlang, "mug_ffi", "recv")
 fn gen_tcp_receive(
   socket: Socket,
   read_bytes_num: Int,
@@ -500,12 +938,24 @@ pub fn shutdown(socket: Socket) -> Result(Nil, Error)
 /// process that established the socket with the `connect` function.
 ///
 pub fn receive_next_packet_as_message(socket: Socket) -> Nil {
-  set_socket_options(socket, [Active(active_once())])
+  case socket {
+    TcpSocket(socket) -> set_tcp_socket_options(socket, [Active(active_once())])
+    SslSocket(socket) -> set_ssl_socket_options(socket, [Active(active_once())])
+  }
   Nil
 }
 
 @external(erlang, "inet", "setopts")
-fn set_socket_options(socket: Socket, options: List(GenTcpOption)) -> DoNotLeak
+fn set_tcp_socket_options(
+  socket: TcpSocket,
+  options: List(GenTcpOption),
+) -> DoNotLeak
+
+@external(erlang, "ssl", "setopts")
+fn set_ssl_socket_options(
+  socket: SslSocket,
+  options: List(GenTcpOption),
+) -> DoNotLeak
 
 /// Messages that can be sent by the socket to the process that controls it.
 ///
@@ -515,7 +965,9 @@ pub type TcpMessage {
   /// The socket has been closed by the client.
   SocketClosed(Socket)
   /// An error has occurred on the socket.
-  TcpError(Socket, Error)
+  SocketError(Socket, Error)
+  // Only sent in {active, N} mode when counter drops to 0.
+  // Passive(Socket)
 }
 
 /// Configure a selector to receive messages from TCP sockets.
@@ -544,3 +996,30 @@ fn map_tcp_message(mapper: fn(TcpMessage) -> t) -> fn(Dynamic) -> t {
 
 @external(erlang, "mug_ffi", "coerce_tcp_message")
 fn unsafe_decode(message: Dynamic) -> TcpMessage
+
+/// Configure a selector to receive messages from TLS sockets.
+///
+/// Note this will receive messages from all TLS sockets that the process
+/// controls, rather than any specific one. If you wish to only handle messages
+/// from one socket then use one process per socket.
+///
+pub fn select_tls_messages(
+  selector: process.Selector(t),
+  mapper: fn(TcpMessage) -> t,
+) -> process.Selector(t) {
+  let ssl = atom.create("ssl")
+  let closed = atom.create("ssl_closed")
+  let error = atom.create("ssl_error")
+
+  selector
+  |> process.select_record(ssl, 2, map_ssl_message(mapper))
+  |> process.select_record(closed, 1, map_ssl_message(mapper))
+  |> process.select_record(error, 2, map_ssl_message(mapper))
+}
+
+fn map_ssl_message(mapper: fn(TcpMessage) -> t) -> fn(Dynamic) -> t {
+  fn(message) { mapper(ssl_unsafe_decode(message)) }
+}
+
+@external(erlang, "mug_ffi", "coerce_ssl_message")
+fn ssl_unsafe_decode(message: Dynamic) -> TcpMessage
