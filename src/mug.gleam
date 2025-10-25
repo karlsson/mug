@@ -7,9 +7,6 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
-import mug/internal/ssl_options.{
-  type SslOptionName, Cacertfile, Cacerts, CertsKeys, Verify,
-}
 import mug/internal/system_cacerts
 
 /// Errors that can occur when establishing a TCP connection.
@@ -24,11 +21,11 @@ pub type ConnectError {
 type TcpSocket
 
 /// A TLS socket, used to send and receive TCP messages.
-type SslSocket
+type TlsSocket
 
 pub opaque type Socket {
   TcpSocket(TcpSocket)
-  SslSocket(SslSocket)
+  TlsSocket(TlsSocket)
 }
 
 /// Returns True if the given socket is a TLS connection (started either
@@ -37,7 +34,7 @@ pub opaque type Socket {
 ///
 pub fn socket_is_tls(socket: Socket) {
   case socket {
-    SslSocket(_) -> True
+    TlsSocket(_) -> True
     TcpSocket(_) -> False
   }
 }
@@ -407,21 +404,10 @@ pub type ConnectionOptions {
     /// The default is `Ipv6Preferred`.
     ///
     ip_version_preference: IpVersionPreference,
-    /// TLS options
-    tls_opts: TlsConnectionOptions,
+    /// Optional TLS over TCP options
+    tls_opts: Option(TlsOptions),
   )
 }
-
-/// Use TLS over TCP
-pub type TlsConnectionOptions =
-  Option(TlsOptions)
-
-// {
-//   /// Do not use TLS, use plain TCP
-//   NoTls
-//   /// Start with a TLS connection
-//   UseTls(TlsOptions)
-// }
 
 /// Configuration for TLS connections.
 pub type TlsOptions {
@@ -678,27 +664,34 @@ fn gen_tcp_connect(
   timeout: Int,
 ) -> Result(TcpSocket, Error)
 
-@external(erlang, "mug_ffi", "ssl_connect")
-fn ssl_connect(
+@external(erlang, "mug_ffi", "tls_connect")
+fn tls_connect(
   host: Charlist,
   port: Int,
   gen_options: List(GenTcpOption),
-  options: List(SslOption),
+  options: List(TlsOption),
   timeout: Int,
-) -> Result(SslSocket, Error)
+) -> Result(TlsSocket, Error)
 
 type VerifyValue {
   VerifyPeer
   VerifyNone
 }
 
-type SslOption =
-  #(SslOptionName, Dynamic)
+type TlsOptionName {
+  Verify
+  Cacerts
+  Cacertfile
+  CertsKeys
+}
+
+type TlsOption =
+  #(TlsOptionName, Dynamic)
 
 @external(erlang, "gleam@function", "identity")
 fn from(value: a) -> Dynamic
 
-fn get_tls_options(vm: TlsVerificationMethod) -> Result(List(SslOption), Error) {
+fn get_tls_options(vm: TlsVerificationMethod) -> Result(List(TlsOption), Error) {
   case vm {
     DangerouslyDisableVerification -> Ok([#(Verify, from(VerifyNone))])
     Certificates(system, cacerts, certificates_keys) -> {
@@ -715,7 +708,7 @@ fn get_tls_options(vm: TlsVerificationMethod) -> Result(List(SslOption), Error) 
 fn get_cacerts_opt(
   system: Bool,
   cacerts: Option(CaCertificates),
-) -> Result(SslOption, Error) {
+) -> Result(TlsOption, Error) {
   case system, cacerts {
     False, Some(DerEncodedCaCertificates(cacerts)) ->
       Ok(#(Cacerts, from(cacerts)))
@@ -764,8 +757,8 @@ pub fn connect(options: ConnectionOptions) -> Result(Socket, ConnectError) {
     case options.tls_opts {
       Some(TlsOptions(vm)) -> {
         use opts <- result.try(get_tls_options(vm))
-        ssl_connect(host, options.port, gen_options, opts, options.timeout)
-        |> result.map(SslSocket)
+        tls_connect(host, options.port, gen_options, opts, options.timeout)
+        |> result.map(TlsSocket)
       }
       _ -> {
         gen_tcp_connect(host, options.port, gen_options, options.timeout)
@@ -801,12 +794,12 @@ pub fn connect(options: ConnectionOptions) -> Result(Socket, ConnectError) {
   }
 }
 
-@external(erlang, "mug_ffi", "ssl_upgrade")
-fn ssl_upgrade(
+@external(erlang, "mug_ffi", "tls_upgrade")
+fn tls_upgrade(
   socket: TcpSocket,
-  options: List(SslOption),
+  options: List(TlsOption),
   timeout: Int,
-) -> Result(SslSocket, Error)
+) -> Result(TlsSocket, Error)
 
 /// Upgrade a plain TCP connection to TLS.
 ///
@@ -830,16 +823,16 @@ pub fn upgrade(
   case socket {
     TcpSocket(socket) -> {
       use opts <- result.try(get_tls_options(vm))
-      ssl_upgrade(socket, opts, timeout)
-      |> result.map(SslSocket)
+      tls_upgrade(socket, opts, timeout)
+      |> result.map(TlsSocket)
     }
     socket -> Ok(socket)
   }
 }
 
-@external(erlang, "mug_ffi", "ssl_downgrade")
-fn ssl_downgrade(
-  socket: SslSocket,
+@external(erlang, "mug_ffi", "tls_downgrade")
+fn tls_downgrade(
+  socket: TlsSocket,
   milliseconds timeout: Int,
 ) -> Result(#(TcpSocket, Option(BitArray)), Error)
 
@@ -863,8 +856,8 @@ pub fn downgrade(
   milliseconds timeout: Int,
 ) -> Result(#(Socket, Option(BitArray)), Error) {
   case socket {
-    SslSocket(sock) ->
-      ssl_downgrade(sock, timeout)
+    TlsSocket(sock) ->
+      tls_downgrade(sock, timeout)
       |> result.map(fn(x) { #(TcpSocket(x.0), x.1) })
     TcpSocket(sock) -> Ok(#(TcpSocket(sock), None))
   }
@@ -940,7 +933,7 @@ pub fn shutdown(socket: Socket) -> Result(Nil, Error)
 pub fn receive_next_packet_as_message(socket: Socket) -> Nil {
   case socket {
     TcpSocket(socket) -> set_tcp_socket_options(socket, [Active(active_once())])
-    SslSocket(socket) -> set_ssl_socket_options(socket, [Active(active_once())])
+    TlsSocket(socket) -> set_tls_socket_options(socket, [Active(active_once())])
   }
   Nil
 }
@@ -952,8 +945,8 @@ fn set_tcp_socket_options(
 ) -> DoNotLeak
 
 @external(erlang, "ssl", "setopts")
-fn set_ssl_socket_options(
-  socket: SslSocket,
+fn set_tls_socket_options(
+  socket: TlsSocket,
   options: List(GenTcpOption),
 ) -> DoNotLeak
 
@@ -1012,14 +1005,14 @@ pub fn select_tls_messages(
   let error = atom.create("ssl_error")
 
   selector
-  |> process.select_record(ssl, 2, map_ssl_message(mapper))
-  |> process.select_record(closed, 1, map_ssl_message(mapper))
-  |> process.select_record(error, 2, map_ssl_message(mapper))
+  |> process.select_record(ssl, 2, map_tls_message(mapper))
+  |> process.select_record(closed, 1, map_tls_message(mapper))
+  |> process.select_record(error, 2, map_tls_message(mapper))
 }
 
-fn map_ssl_message(mapper: fn(TcpMessage) -> t) -> fn(Dynamic) -> t {
-  fn(message) { mapper(ssl_unsafe_decode(message)) }
+fn map_tls_message(mapper: fn(TcpMessage) -> t) -> fn(Dynamic) -> t {
+  fn(message) { mapper(tls_unsafe_decode(message)) }
 }
 
-@external(erlang, "mug_ffi", "coerce_ssl_message")
-fn ssl_unsafe_decode(message: Dynamic) -> TcpMessage
+@external(erlang, "mug_ffi", "coerce_tls_message")
+fn tls_unsafe_decode(message: Dynamic) -> TcpMessage

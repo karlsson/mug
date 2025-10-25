@@ -1,9 +1,9 @@
 -module(mug_ffi).
 
 -export([send/2, recv/3, shutdown/1,
-         coerce_tcp_message/1, coerce_ssl_message/1,
-         active_once/0, passive/0, ssl_upgrade/3, ssl_connect/5,
-         get_certs_keys/1, ssl_downgrade/2, get_system_cacerts/0]).
+         coerce_tcp_message/1, coerce_tls_message/1,
+         active_once/0, passive/0, tls_upgrade/3, tls_connect/5,
+         get_certs_keys/1, tls_downgrade/2, get_system_cacerts/0]).
 
 active_once() ->
     once.
@@ -13,23 +13,23 @@ passive() ->
 
 send({tcp_socket, Socket}, Packet) ->
     normalise(gen_tcp:send(Socket, Packet));
-send({ssl_socket, Socket}, Packet) ->
+send({tls_socket, Socket}, Packet) ->
 		normalise(ssl:send(Socket, Packet)).
 
 recv({tcp_socket, Socket}, Length, Timeout) ->
     gen_tcp:recv(Socket, Length, Timeout);
-recv({ssl_socket, Socket}, Length, Timeout) ->
+recv({tls_socket, Socket}, Length, Timeout) ->
 		ssl:recv(Socket, Length, Timeout).
 
 shutdown({tcp_socket, Socket}) ->
     normalise(gen_tcp:shutdown(Socket, read_write));
-shutdown({ssl_socket, Socket}) ->
+shutdown({tls_socket, Socket}) ->
     normalise(ssl:shutdown(Socket, read_write)).
 
-ssl_upgrade(Socket, Options, Timeout) ->
+tls_upgrade(Socket, Options, Timeout) ->
     normalise(ssl:connect(Socket, Options, Timeout)).
 
-ssl_connect(Host, Port, GenTcpOptions, Options, Timeout) ->
+tls_connect(Host, Port, GenTcpOptions, Options, Timeout) ->
     normalise(ssl:connect(Host, Port, GenTcpOptions ++ Options, Timeout)).
 
 get_certs_keys(CertsKeysList) ->
@@ -47,7 +47,7 @@ normalize_key_algo(dsa_private_key) -> 'DSAPrivateKey';
 normalize_key_algo(ec_private_key) -> 'ECPrivateKey';
 normalize_key_algo(private_key_info) -> 'PrivateKeyInfo'.
 
-ssl_downgrade(Socket, Timeout) ->
+tls_downgrade(Socket, Timeout) ->
     case ssl:close(Socket, Timeout) of
         ok -> {error, closed};
         {ok, Port} -> {ok, {Port, nil}};
@@ -83,12 +83,12 @@ coerce_tcp_message({tcp_error, Socket, Error}) ->
 %% coerce_tcp_message({tcp_passive, Socket}) ->
 %%    {passive, {tcp_socket, Socket}}.
 
-coerce_ssl_message({ssl, Socket, Data}) ->
-    {packet, {ssl_socket, Socket}, Data};
-coerce_ssl_message({ssl_closed, Socket}) ->
-    {socket_closed, {ssl_socket, Socket}};
-coerce_ssl_message({ssl_error, Socket, Error}) ->
-    {socket_error, {ssl_socket, Socket}, Error}.
+coerce_tls_message({ssl, Socket, Data}) ->
+    {packet, {tls_socket, Socket}, Data};
+coerce_tls_message({ssl_closed, Socket}) ->
+    {socket_closed, {tls_socket, Socket}};
+coerce_tls_message({ssl_error, Socket, Error}) ->
+    {socket_error, {tls_socket, Socket}, Error}.
 %% Only sent in {active, N} mode when counter drops to 0.
-%% coerce_ssl_message({ssl_passive, Socket}) ->
- %%   {passive, {ssl_socket, Socket}}.
+%% coerce_tls_message({ssl_passive, Socket}) ->
+ %%   {passive, {tls_socket, Socket}}.

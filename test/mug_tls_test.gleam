@@ -13,7 +13,6 @@ fn connect() {
     mug.new("localhost", port: port)
     |> mug.with_tls()
     |> mug.dangerously_disable_verification()
-    //    |> mug.ip_version_preference(mug.Ipv4Only)
     |> mug.connect()
   let assert True = mug.socket_is_tls(socket)
   socket
@@ -25,19 +24,18 @@ pub fn connect_without_verification_test() {
   Nil
 }
 
-// Gets Econnrefused on this
-// pub fn connect_with_system_ca_test() {
-//   let assert Ok(socket) =
-//     mug.new("example.com", port: 443)
-//     |> mug.timeout(milliseconds: 10_000)
-//     |> mug.with_tls()
-//     |> mug.connect()
-//   let assert Ok(_) = mug.shutdown(socket)
-//   Nil
-// }
+pub fn connect_with_system_ca_test() {
+  let assert Ok(socket) =
+    mug.new("gleam.run", port: 443)
+    |> mug.timeout(milliseconds: 10_000)
+    |> mug.with_tls()
+    |> mug.connect()
+  let assert Ok(_) = mug.shutdown(socket)
+  Nil
+}
 
 pub fn connect_without_system_ca_test() {
-  let assert Error(mug.ConnectFailedIpv4(mug.TlsAlert(mug.UnknownCa, _))) =
+  let assert Error(mug.ConnectFailedIpv4(mug.TlsAlert(mug.UnknownCa, _desc))) =
     mug.new("gleam.run", port: 443)
     |> mug.timeout(milliseconds: 10_000)
     |> mug.with_tls()
