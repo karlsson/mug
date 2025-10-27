@@ -20,7 +20,7 @@ pub type ConnectError {
 /// A TCP socket, used to send and receive TCP messages.
 type TcpSocket
 
-/// A TLS socket, used to send and receive TCP messages.
+/// A TLS socket, used to send and receive TLS over TCP messages.
 type TlsSocket
 
 pub opaque type Socket {

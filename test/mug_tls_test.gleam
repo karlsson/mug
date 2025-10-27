@@ -35,13 +35,15 @@ pub fn connect_with_system_ca_test() {
 }
 
 pub fn connect_without_system_ca_test() {
-  let assert Error(mug.ConnectFailedIpv4(mug.TlsAlert(mug.UnknownCa, _desc))) =
+  let assert Error(mug.ConnectFailedIpv4(mug.TlsAlert(mug.UnknownCa, desc))) =
     mug.new("gleam.run", port: 443)
     |> mug.timeout(milliseconds: 10_000)
     |> mug.with_tls()
     |> mug.ip_version_preference(mug.Ipv4Only)
     |> mug.no_system_cacerts()
     |> mug.connect()
+  // This will fail (crash with badarg) if desc is not a String
+  let _ = mug.describe_tls_alert(mug.UnknownCa) <> " - " <> desc
   Nil
 }
 
