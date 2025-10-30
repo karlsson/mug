@@ -14,12 +14,12 @@ passive() ->
 send({tcp_socket, Socket}, Packet) ->
     normalise(gen_tcp:send(Socket, Packet));
 send({tls_socket, Socket}, Packet) ->
-		normalise(ssl:send(Socket, Packet)).
+    normalise(ssl:send(Socket, Packet)).
 
 recv({tcp_socket, Socket}, Length, Timeout) ->
     gen_tcp:recv(Socket, Length, Timeout);
 recv({tls_socket, Socket}, Length, Timeout) ->
-		ssl:recv(Socket, Length, Timeout).
+    ssl:recv(Socket, Length, Timeout).
 
 shutdown({tcp_socket, Socket}) ->
     normalise(gen_tcp:shutdown(Socket, read_write));
@@ -33,14 +33,21 @@ tls_connect(Host, Port, GenTcpOptions, Options, Timeout) ->
     normalise(ssl:connect(Host, Port, GenTcpOptions ++ Options, Timeout)).
 
 get_certs_keys(CertsKeysList) ->
-    lists:map(fun (CertsKeys) -> case CertsKeys of
-        {der_encoded_certificates_keys, Certs, {der_encoded_key, KeyAlg, KeyBin}} ->
-            #{ cert => lists:map(fun unicode:characters_to_list/1, Certs), key => {normalize_key_algo(KeyAlg), KeyBin} };
-        {pem_encoded_certificates_keys, Certfile, Keyfile, none} ->
-            #{ certfile => unicode:characters_to_list(Certfile), keyfile => unicode:characters_to_list(Keyfile) };
-        {pem_encoded_certificates_keys, Certfile, Keyfile, {some, Password}} ->
-            #{ certfile => unicode:characters_to_list(Certfile), keyfile => unicode:characters_to_list(Keyfile), password => unicode:characters_to_list(Password) }
-    end end, CertsKeysList).
+    lists:map(
+      fun (CertsKeys) ->
+              case CertsKeys of
+                  {der_encoded_certificates_keys, Certs, {der_encoded_key, KeyAlg, KeyBin}} ->
+                      #{ cert => lists:map(fun unicode:characters_to_list/1, Certs),
+                         key => {normalize_key_algo(KeyAlg), KeyBin} };
+                  {pem_encoded_certificates_keys, Certfile, Keyfile, none} ->
+                      #{ certfile => unicode:characters_to_list(Certfile),
+                         keyfile => unicode:characters_to_list(Keyfile) };
+                  {pem_encoded_certificates_keys, Certfile, Keyfile, {some, Password}} ->
+                      #{ certfile => unicode:characters_to_list(Certfile),
+                         keyfile => unicode:characters_to_list(Keyfile),
+                         password => unicode:characters_to_list(Password) }
+              end
+      end, CertsKeysList).
 
 normalize_key_algo(rsa_private_key) -> 'RSAPrivateKey';
 normalize_key_algo(dsa_private_key) -> 'DSAPrivateKey';
@@ -69,7 +76,7 @@ normalise({ok, T}) ->
 normalise({error, {timeout, _}}) ->
     {error, timeout};
 normalise({error, {tls_alert, {Alert, Description}}}) ->
-    {error, {tls_alert, Alert, list_to_binary(Description)}};
+    {error, {tls_alert, Alert, unicode:characters_to_binary(Description)}};
 normalise({error, _} = E) ->
     E.
 
@@ -91,4 +98,4 @@ coerce_tls_message({ssl_error, Socket, Error}) ->
     {socket_error, {tls_socket, Socket}, Error}.
 %% Only sent in {active, N} mode when counter drops to 0.
 %% coerce_tls_message({ssl_passive, Socket}) ->
- %%   {passive, {tls_socket, Socket}}.
+%%   {passive, {tls_socket, Socket}}.
