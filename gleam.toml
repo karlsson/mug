@@ -1,6 +1,6 @@
 name = "mug"
 version = "4.0.0"
-gleam = ">= 1.11.0"
+gleam = ">= 1.13.0"
 
 description = "A TCP client for Gleam!"
 licences = ["Apache-2.0"]
