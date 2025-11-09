@@ -12,7 +12,8 @@ fn connect() {
   let assert Ok(socket) =
     mug.new("localhost", port: port)
     |> mug.with_tls()
-    |> mug.dangerously_disable_verification()
+    |> mug.no_system_cacerts()
+    |> mug.cacerts(mug.PemEncodedCaCertificates("test/certs/ca.crt"))
     |> mug.connect()
   let assert True = mug.socket_is_tls(socket)
   socket
@@ -50,7 +51,7 @@ pub fn connect_without_system_ca_test() {
 pub fn connect_invalid_host_test() {
   let assert Error(mug.ConnectFailedIpv4(mug.Nxdomain)) =
     mug.new("invalid.example.com", port: port)
-    |> mug.timeout(milliseconds: 500)
+    |> mug.timeout(milliseconds: 4500)
     |> mug.with_tls()
     |> mug.ip_version_preference(mug.Ipv4Only)
     |> mug.connect()
@@ -70,26 +71,40 @@ pub fn upgrade_test() {
   Nil
 }
 
+// Erlang's SSL module currently errors on self-signed certificates,
+// but not if signed with an own (self-signed) CA.
 pub fn upgrade_self_signed_test() {
   let assert Ok(tcp_socket) =
     mug.new("localhost", port: port)
     |> mug.connect()
-  // Erlang's SSL module currently errors on self-signed certificates,
-  // so when there's a way to use self-signed certificates later,
-  // this let assert should be testing for an Ok value instead.
-  let assert Error(mug.TlsAlert(alert: mug.BadCertificate, ..)) =
+  let assert Ok(socket) =
     mug.upgrade(
       tcp_socket,
       mug.Certificates(
         False,
         option.Some(mug.PemEncodedCaCertificates("test/certs/ca.crt")),
-        [
-          mug.PemEncodedCertificatesKeys(
-            certificate_path: "test/certs/server.crt",
-            key_path: "test/certs/server.key",
-            password: option.None,
-          ),
-        ],
+        [],
+      ),
+      1000,
+    )
+  let assert Ok(Nil) = mug.send(socket, <<"Hello, Robert!\n":utf8>>)
+  let assert Ok(data) = mug.receive(socket, 500)
+  should.equal(data, <<"Hello, Robert!\n":utf8>>)
+  let assert Ok(Nil) = mug.shutdown(socket)
+  Nil
+}
+
+pub fn upgrade_self_signed_wrong_cert_test() {
+  let assert Ok(tcp_socket) =
+    mug.new("localhost", port: port)
+    |> mug.connect()
+  let assert Error(mug.TlsAlert(mug.UnknownCa, _)) =
+    mug.upgrade(
+      tcp_socket,
+      mug.Certificates(
+        False,
+        option.Some(mug.PemEncodedCaCertificates("test/certs/ca_2.crt")),
+        [],
       ),
       1000,
     )
